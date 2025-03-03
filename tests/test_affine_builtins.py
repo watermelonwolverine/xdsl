@@ -2,7 +2,15 @@ import re
 
 import pytest
 
-from xdsl.ir.affine import AffineBinaryOpExpr, AffineBinaryOpKind, AffineExpr, AffineMap
+from xdsl.ir.affine import (
+    AffineBinaryOpExpr,
+    AffineBinaryOpKind,
+    AffineConstantExpr,
+    AffineDimExpr,
+    AffineExpr,
+    AffineMap,
+    AffineSymExpr,
+)
 
 
 def test_simple_map():
@@ -212,8 +220,152 @@ def test_compress_dims():
     ) == AffineMap.from_callable(lambda d0, d1: (d1, d1))
 
 
-def test_used_dims():
+def test_affine_expr_used_dims():
     assert AffineExpr.dimension(1).used_dims() == {1}
     assert (AffineExpr.dimension(2) + AffineExpr.dimension(3)).used_dims() == {2, 3}
     assert AffineExpr.symbol(4).used_dims() == set()
     assert AffineExpr.constant(5).used_dims() == set()
+
+
+def test_affine_expr_is_function_of_dim():
+    assert AffineExpr.dimension(0).is_function_of_dim(0)
+    assert not AffineExpr.dimension(1).is_function_of_dim(0)
+    assert not AffineExpr.constant(0).is_function_of_dim(0)
+    assert not AffineExpr.symbol(0).is_function_of_dim(0)
+    assert AffineMap(2, 0, (AffineExpr.dimension(0),)).results[0].is_function_of_dim(0)
+    assert not (
+        AffineMap(2, 0, (AffineExpr.dimension(0),)).results[0].is_function_of_dim(1)
+    )
+    assert (
+        AffineMap.from_callable(lambda i, j: (i + j,)).results[0].is_function_of_dim(0)
+    )
+    assert (
+        AffineMap.from_callable(lambda i, j: (i + j,)).results[0].is_function_of_dim(1)
+    )
+
+
+def test_affine_expr_as_constant():
+    # Should return AffineConstExpr when both lhs and rhs are AffineConstantExpr
+    assert AffineBinaryOpExpr(
+        AffineBinaryOpKind.Add, AffineConstantExpr(1), AffineConstantExpr(1)
+    ).as_constant() == AffineConstantExpr(2)
+    assert AffineBinaryOpExpr(
+        AffineBinaryOpKind.Mul, AffineConstantExpr(2), AffineConstantExpr(3)
+    ).as_constant() == AffineConstantExpr(6)
+    assert AffineBinaryOpExpr(
+        AffineBinaryOpKind.Mod, AffineConstantExpr(5), AffineConstantExpr(2)
+    ).as_constant() == AffineConstantExpr(1)
+    assert AffineBinaryOpExpr(
+        AffineBinaryOpKind.FloorDiv, AffineConstantExpr(5), AffineConstantExpr(2)
+    ).as_constant() == AffineConstantExpr(2)
+    assert AffineBinaryOpExpr(
+        AffineBinaryOpKind.CeilDiv, AffineConstantExpr(5), AffineConstantExpr(2)
+    ).as_constant() == AffineConstantExpr(3)
+
+    # Should return None if either lhs or rhs cannot be constant folded
+    assert (
+        AffineBinaryOpExpr(
+            AffineBinaryOpKind.Add,
+            AffineConstantExpr(1),
+            AffineDimExpr(0),
+        ).as_constant()
+        is None
+    )
+    assert (
+        AffineBinaryOpExpr(
+            AffineBinaryOpKind.Add,
+            AffineDimExpr(0),
+            AffineConstantExpr(1),
+        ).as_constant()
+        is None
+    )
+    assert (
+        AffineBinaryOpExpr(
+            AffineBinaryOpKind.Add,
+            AffineSymExpr(0),
+            AffineConstantExpr(1),
+        ).as_constant()
+        is None
+    )
+    assert (
+        AffineBinaryOpExpr(
+            AffineBinaryOpKind.Add,
+            AffineConstantExpr(1),
+            AffineSymExpr(0),
+        ).as_constant()
+        is None
+    )
+
+    # Test recursion
+    assert AffineBinaryOpExpr(
+        AffineBinaryOpKind.Add,
+        AffineConstantExpr(1),
+        AffineBinaryOpExpr(
+            AffineBinaryOpKind.Mul,
+            AffineConstantExpr(2),
+            AffineConstantExpr(3),
+        ),
+    ).as_constant() == AffineConstantExpr(7)
+
+
+def test_affine_map_is_function_of_dim():
+    assert AffineMap.from_callable(lambda i, j: (i, j)).is_function_of_dim(0)
+    assert AffineMap.from_callable(lambda i, j: (i, j)).is_function_of_dim(1)
+    assert not AffineMap.from_callable(lambda i, j, _: (i, j)).is_function_of_dim(2)
+
+
+def test_affine_map_used_dims():
+    assert AffineMap.from_callable(lambda i, j: (i, j)).used_dims() == {0, 1}
+    assert AffineMap.from_callable(lambda i, j, _: (i + j,)).used_dims() == {0, 1}
+    assert AffineMap.from_callable(lambda i, _, k: (i, k)).used_dims() == {0, 2}
+
+
+def test_affine_map_unused_dims():
+    assert AffineMap.from_callable(lambda i, j: (i, j)).unused_dims() == set()
+    assert AffineMap.from_callable(lambda i, j, _: (i + j,)).unused_dims() == {2}
+    assert AffineMap.from_callable(lambda i, _, k: (i, k)).unused_dims() == {1}
+
+
+def test_unused_dims_bit_vector():
+    assert AffineMap.from_callable(lambda i, j: (i, j)).unused_dims_bit_vector() == (
+        False,
+        False,
+    )
+    assert AffineMap.from_callable(
+        lambda i, j, _: (i + j,)
+    ).unused_dims_bit_vector() == (False, False, True)
+    assert AffineMap.from_callable(lambda i, _, k: (i, k)).unused_dims_bit_vector() == (
+        False,
+        True,
+        False,
+    )
+
+
+def test_affine_map_compose_with_values():
+    assert AffineMap.from_callable(lambda i, j: (i, j)).compose_with_values((1, 2)) == (
+        1,
+        2,
+    )
+    assert AffineMap.from_callable(lambda i, j: (i + 1, j - 1)).compose_with_values(
+        (1, 2)
+    ) == (2, 1)
+
+    # Should fail when the number of values does not match the number of dims
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Cannot compose AffineMaps with mismatching dimensions and results: self.num_dims != len(map.results) (2 != 1)"
+        ),
+    ):
+        AffineMap.from_callable(lambda i, j: (i + 1, j - 1)).compose_with_values((1,))
+
+    # Should fail if the affine map has symbols
+    x = AffineExpr.dimension(0)
+    N = AffineExpr.symbol(0)
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Cannot compose a AffineMap with values if the map has symbols."
+        ),
+    ):
+        AffineMap(1, 1, (x + N,)).compose_with_values((1,))
